@@ -316,10 +316,216 @@ class PDFMetadataAnalyzer:
         similar_files.sort(key=lambda x: x['matches'], reverse=True)
         return similar_files, cache_used
 
+class PDFSearchTab:
+    def __init__(self, parent_frame):
+        self.parent = parent_frame
+        self.is_searching = False
+        self.stop_search = False
+        self.setup_search_tab()
+    
+    def setup_search_tab(self):
+        # Variables
+        self.folder_path = tk.StringVar()
+        self.search_text = tk.StringVar()
+        
+        # Marco principal de búsqueda
+        search_main_frame = ttk.Frame(self.parent)
+        search_main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Título
+        title_label = ttk.Label(search_main_frame, 
+                               text="🔍 Buscador de Texto en PDFs", 
+                               font=("Arial", 12, "bold"))
+        title_label.pack(pady=(0, 15))
+        
+        # Frame de selección
+        selection_frame = ttk.LabelFrame(search_main_frame, text="Configuración de Búsqueda", padding="10")
+        selection_frame.pack(fill=tk.X, pady=5)
+        
+        # Selección de carpeta
+        ttk.Label(selection_frame, text="Carpeta:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        folder_entry = ttk.Entry(selection_frame, textvariable=self.folder_path, width=60)
+        folder_entry.grid(row=0, column=1, padx=5, pady=5, sticky=(tk.W, tk.E))
+        ttk.Button(selection_frame, text="📁 Seleccionar Carpeta", 
+                  command=self.select_folder).grid(row=0, column=2, pady=5)
+        
+        # Texto de búsqueda
+        ttk.Label(selection_frame, text="Texto a buscar:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        search_entry = ttk.Entry(selection_frame, textvariable=self.search_text, width=60)
+        search_entry.grid(row=1, column=1, padx=5, pady=5, sticky=(tk.W, tk.E))
+        
+        # Frame para botones de búsqueda
+        button_frame = ttk.Frame(selection_frame)
+        button_frame.grid(row=1, column=2, pady=5)
+        
+        self.search_button = ttk.Button(button_frame, text="🔍 Buscar", 
+                                       command=self.start_search)
+        self.search_button.pack(side=tk.LEFT, padx=2)
+        
+        self.stop_button = ttk.Button(button_frame, text="⏹️ Detener", 
+                                     command=self.stop_search_process, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.LEFT, padx=2)
+        
+        selection_frame.columnconfigure(1, weight=1)
+        
+        # Progress bar
+        progress_frame = ttk.Frame(search_main_frame)
+        progress_frame.pack(fill=tk.X, pady=10)
+        
+        self.progress = ttk.Progressbar(progress_frame, mode='indeterminate')
+        self.progress.pack(fill=tk.X, pady=5)
+        
+        # Label de estado
+        self.status_label = ttk.Label(progress_frame, text="Listo para buscar")
+        self.status_label.pack(pady=2)
+        
+        # Lista de resultados
+        results_frame = ttk.LabelFrame(search_main_frame, text="Resultados de Búsqueda", padding="10")
+        results_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # Frame para controles de resultados
+        results_controls = ttk.Frame(results_frame)
+        results_controls.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(results_controls, text="Archivos encontrados:").pack(side=tk.LEFT)
+        
+        # 🔥 CAMBIO: Botón siempre habilitado
+        self.open_selected_btn = ttk.Button(results_controls, text="📖 Abrir Seleccionado", 
+                                          command=self.open_selected_file, state=tk.NORMAL)  # Cambiado a NORMAL
+        self.open_selected_btn.pack(side=tk.RIGHT, padx=(10, 0))
+        
+        # Listbox con scrollbar
+        listbox_frame = ttk.Frame(results_frame)
+        listbox_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.results_list = tk.Listbox(listbox_frame, width=80, height=15)
+        self.results_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        scrollbar = ttk.Scrollbar(listbox_frame, orient=tk.VERTICAL, command=self.results_list.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.results_list.configure(yscrollcommand=scrollbar.set)
+        
+        # Bind para abrir archivo con doble click
+        self.results_list.bind('<Double-Button-1>', lambda e: self.open_selected_file())
+    
+    def select_folder(self):
+        folder = filedialog.askdirectory(title="Seleccionar carpeta para buscar en PDFs")
+        if folder:
+            self.folder_path.set(folder)
+    
+    def start_search(self):
+        if not self.folder_path.get():
+            messagebox.showwarning("Advertencia", "Selecciona una carpeta primero")
+            return
+            
+        if not self.search_text.get().strip():
+            messagebox.showwarning("Advertencia", "Ingresa un texto a buscar")
+            return
+        
+        # Limpiar resultados anteriores
+        self.results_list.delete(0, tk.END)
+        
+        # Configurar interfaz para búsqueda
+        self.is_searching = True
+        self.stop_search = False
+        self.search_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
+        # 🔥 CAMBIO: No deshabilitar el botón de abrir seleccionado
+        self.progress.start(10)
+        self.status_label.config(text="Buscando...")
+        
+        # Ejecutar búsqueda en hilo separado
+        search_thread = threading.Thread(target=self.search_pdfs_thread)
+        search_thread.daemon = True
+        search_thread.start()
+        
+        # Verificar estado del hilo periódicamente
+        self.check_search_thread()
+    
+    def stop_search_process(self):
+        self.stop_search = True
+        self.status_label.config(text="Deteniendo búsqueda...")
+    
+    def check_search_thread(self):
+        if self.is_searching:
+            # Revisar nuevamente en 100ms
+            self.parent.after(100, self.check_search_thread)
+        else:
+            # La búsqueda terminó
+            self.progress.stop()
+            self.search_button.config(state=tk.NORMAL)
+            self.stop_button.config(state=tk.DISABLED)
+    
+    def search_pdfs_thread(self):
+        try:
+            found_files = []
+            search_string = self.search_text.get().strip()
+            pdf_files = list(Path(self.folder_path.get()).rglob("*.pdf"))
+            total_files = len(pdf_files)
+            
+            for i, pdf_file in enumerate(pdf_files):
+                if self.stop_search:
+                    break
+                    
+                # Actualizar estado
+                self.parent.after(0, lambda f=pdf_file.name, i=i, total=total_files: 
+                               self.status_label.config(text=f"Procesando {i+1}/{total_files}: {f}"))
+                
+                try:
+                    with fitz.open(pdf_file) as doc:
+                        text = ""
+                        for page in doc:
+                            if self.stop_search:
+                                break
+                            text += page.get_text()
+                        
+                        if search_string.lower() in text.lower():
+                            found_files.append(str(pdf_file))
+                            # Actualizar lista en el hilo principal
+                            self.parent.after(0, lambda f=str(pdf_file): self.results_list.insert(tk.END, f))
+                            
+                except Exception as e:
+                    print(f"Error leyendo {pdf_file}: {str(e)}")
+            
+            # Mostrar resultados finales
+            self.parent.after(0, self.show_search_results, found_files, self.stop_search)
+            
+        except Exception as e:
+            self.parent.after(0, lambda: messagebox.showerror("Error", f"Error durante la búsqueda: {str(e)}"))
+        finally:
+            self.is_searching = False
+    
+    def show_search_results(self, found_files, was_cancelled):
+        if was_cancelled:
+            self.status_label.config(text=f"Búsqueda cancelada. Se encontraron {len(found_files)} archivos")
+            messagebox.showinfo("Búsqueda cancelada", f"Se encontraron {len(found_files)} archivos antes de cancelar")
+        elif found_files:
+            self.status_label.config(text=f"Búsqueda completada. Se encontraron {len(found_files)} archivos")
+            # 🔥 CAMBIO: No cambiar el estado del botón, ya está habilitado
+            messagebox.showinfo("Resultados", f"Se encontraron {len(found_files)} archivos con el texto")
+        else:
+            self.status_label.config(text="Búsqueda completada. No se encontraron archivos")
+            messagebox.showinfo("Resultados", "No se encontraron archivos con el texto buscado")
+    
+    def open_selected_file(self):
+        selection = self.results_list.curselection()
+        if not selection:
+            messagebox.showwarning("Advertencia", "Selecciona un archivo de la lista")
+            return
+            
+        file_path = self.results_list.get(selection[0])
+        try:
+            os.startfile(file_path)
+        except:
+            try:
+                webbrowser.open(file_path)
+            except:
+                messagebox.showerror("Error", f"No se pudo abrir el archivo: {file_path}")
+
 class MetadataAnalyzerGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Analizador de Metadatos - Caché Automático")
+        self.root.title("Analizador de Metadatos - By José Valenzuela")
         self.root.geometry("1400x1000")
         
         self.analyzer = PDFMetadataAnalyzer()
@@ -340,7 +546,7 @@ class MetadataAnalyzerGUI:
         main_frame.columnconfigure(1, weight=1)
         
         title_label = ttk.Label(main_frame, 
-                               text="Analizador de Metadatos de PDFs - By José Valenzuela", 
+                               text="Analizador de Metadatos de PDFs - Caché Automático + Buscador de Texto", 
                                font=("Arial", 14, "bold"),
                                justify=tk.CENTER)
         title_label.grid(row=0, column=0, columnspan=3, pady=(0, 15))
@@ -447,19 +653,31 @@ class MetadataAnalyzerGUI:
                                    command=self.clear_all)
         self.clear_btn.pack(side=tk.LEFT)
         
+        # NOTEBOOK CON PESTAÑAS
         results_notebook = ttk.Notebook(main_frame)
         results_notebook.grid(row=5, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=10)
         
+        # Pestaña de metadatos de referencia
         self.reference_frame = ttk.Frame(results_notebook, padding="10")
         results_notebook.add(self.reference_frame, text="📋 Metadatos de Referencia")
         
+        # Pestaña de archivos detectados
         self.results_frame = ttk.Frame(results_notebook, padding="10")
         results_notebook.add(self.results_frame, text="📊 Archivos Detectados")
+        
+        # NUEVA PESTAÑA: Buscador de texto en PDFs
+        self.search_frame = ttk.Frame(results_notebook, padding="10")
+        results_notebook.add(self.search_frame, text="🔍 Buscador de Texto")
         
         main_frame.rowconfigure(5, weight=1)
         
         self.setup_reference_frame()
         self.setup_results_frame()
+        self.setup_search_frame()
+    
+    def setup_search_frame(self):
+        """Configura la pestaña de búsqueda de texto"""
+        self.pdf_search_tab = PDFSearchTab(self.search_frame)
     
     def setup_reference_frame(self):
         self.reference_text = tk.Text(self.reference_frame, height=20, wrap=tk.WORD, font=("Consolas", 9))
