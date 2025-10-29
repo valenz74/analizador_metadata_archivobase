@@ -205,7 +205,8 @@ class PDFMetadataAnalyzer:
         else:
             print(f"✗ Caché no disponible: {cache_status}")
             # Escanear archivos si el caché no es válido
-            pdf_files = list(Path(search_folder).rglob("*.pdf"))
+            pdf_files = [f for f in Path(search_folder).rglob("*.pdf") 
+                        if not f.name.startswith('~$')]
             total_files = len(pdf_files)
             
             for i, pdf_file in enumerate(pdf_files):
@@ -321,7 +322,90 @@ class PDFSearchTab:
         self.parent = parent_frame
         self.is_searching = False
         self.stop_search = False
+        self.cache_file = Path("C:/Users/Jose/Proyectos/analizador_metadata_archivobase/cache_text.json")
+        self.cache_file.parent.mkdir(parents=True, exist_ok=True)
         self.setup_search_tab()
+    
+    def get_folder_modification_time(self, folder_path):
+        """Obtiene el tiempo de modificación de una carpeta recursivamente"""
+        try:
+            folder = Path(folder_path)
+            if not folder.exists():
+                return None
+            
+            # Obtener el tiempo de modificación de la carpeta principal
+            latest_time = folder.stat().st_mtime
+            
+            # Buscar recursivamente en subcarpetas
+            for item in folder.rglob('*'):
+                if item.is_file():
+                    item_time = item.stat().st_mtime
+                    if item_time > latest_time:
+                        latest_time = item_time
+            
+            return latest_time
+        except Exception as e:
+            print(f"Error obteniendo tiempo de modificación de carpeta: {e}")
+            return None
+    
+    def load_text_cache(self, search_folder):
+        """Carga el caché de texto si existe y es válido"""
+        try:
+            if not self.cache_file.exists():
+                return None, "No existe archivo de caché de texto"
+            
+            with open(self.cache_file, 'r', encoding='utf-8') as f:
+                cache_data = json.load(f)
+            
+            # Verificar si la carpeta es la misma
+            cached_folder = cache_data.get('search_folder')
+            if cached_folder != search_folder:
+                return None, "Carpeta diferente"
+            
+            # Verificar si la carpeta ha sido modificada
+            current_mod_time = self.get_folder_modification_time(search_folder)
+            cached_mod_time = cache_data.get('folder_modification_time')
+            
+            if current_mod_time != cached_mod_time:
+                return None, "Carpeta modificada"
+            
+            # Verificar integridad de los archivos en caché
+            text_cache = cache_data.get('text_cache', {})
+            for file_path, file_data in text_cache.items():
+                if not Path(file_path).exists():
+                    return None, "Archivo en caché no existe"
+                
+                # Verificar si el archivo ha sido modificado
+                current_file_time = Path(file_path).stat().st_mtime
+                cached_file_time = file_data.get('modification_time')
+                if current_file_time != cached_file_time:
+                    return None, "Archivo modificado"
+            
+            return text_cache, "Caché de texto válido"
+            
+        except Exception as e:
+            print(f"Error cargando caché de texto: {e}")
+            return None, f"Error: {str(e)}"
+    
+    def save_text_cache(self, search_folder, text_cache):
+        """Guarda el texto extraído en caché"""
+        try:
+            cache_data = {
+                'search_folder': search_folder,
+                'folder_modification_time': self.get_folder_modification_time(search_folder),
+                'cache_timestamp': time.time(),
+                'cache_date': datetime.now().isoformat(),
+                'total_files': len(text_cache),
+                'text_cache': text_cache
+            }
+            
+            with open(self.cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, indent=2, ensure_ascii=False)
+            
+            print(f"Caché de texto guardado exitosamente: {len(text_cache)} archivos")
+            
+        except Exception as e:
+            print(f"Error guardando caché de texto: {e}")
     
     def setup_search_tab(self):
         # Variables
@@ -334,7 +418,7 @@ class PDFSearchTab:
         
         # Título
         title_label = ttk.Label(search_main_frame, 
-                               text="🔍 Buscador de Texto en PDFs", 
+                               text="🔍 Buscador de Texto en PDFs - Con Caché Automático", 
                                font=("Arial", 12, "bold"))
         title_label.pack(pady=(0, 15))
         
@@ -389,9 +473,9 @@ class PDFSearchTab:
         
         ttk.Label(results_controls, text="Archivos encontrados:").pack(side=tk.LEFT)
         
-        # 🔥 CAMBIO: Botón siempre habilitado
+        # Botón siempre habilitado
         self.open_selected_btn = ttk.Button(results_controls, text="📖 Abrir Seleccionado", 
-                                          command=self.open_selected_file, state=tk.NORMAL)  # Cambiado a NORMAL
+                                          command=self.open_selected_file, state=tk.NORMAL)
         self.open_selected_btn.pack(side=tk.RIGHT, padx=(10, 0))
         
         # Listbox con scrollbar
@@ -430,7 +514,6 @@ class PDFSearchTab:
         self.stop_search = False
         self.search_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
-        # 🔥 CAMBIO: No deshabilitar el botón de abrir seleccionado
         self.progress.start(10)
         self.status_label.config(text="Buscando...")
         
@@ -460,51 +543,83 @@ class PDFSearchTab:
         try:
             found_files = []
             search_string = self.search_text.get().strip()
-            pdf_files = list(Path(self.folder_path.get()).rglob("*.pdf"))
+            
+            # Excluir archivos temporales que comienzan con ~$
+            pdf_files = [f for f in Path(self.folder_path.get()).rglob("*.pdf") 
+                        if not f.name.startswith('~$')]
             total_files = len(pdf_files)
             
-            for i, pdf_file in enumerate(pdf_files):
+            # 🔥 NUEVO: CARGAR CACHÉ DE TEXTO
+            text_cache = {}
+            cache_used = False
+            
+            cached_data, cache_status = self.load_text_cache(self.folder_path.get())
+            if cached_data:
+                text_cache = cached_data
+                cache_used = True
+                print(f"✓ Caché de texto: {cache_status}")
+                self.parent.after(0, lambda: self.status_label.config(text=f"Usando caché de texto - Buscando en {len(text_cache)} archivos..."))
+            else:
+                print(f"✗ Caché de texto no disponible: {cache_status}")
+                # Si no hay caché válido, extraer texto de todos los archivos
+                text_cache = {}
+                for i, pdf_file in enumerate(pdf_files):
+                    if self.stop_search:
+                        break
+                        
+                    self.parent.after(0, lambda f=pdf_file.name, i=i, total=total_files: 
+                                   self.status_label.config(text=f"Extrayendo texto {i+1}/{total_files}: {f}"))
+                    
+                    try:
+                        with fitz.open(pdf_file) as doc:
+                            text = ""
+                            for page in doc:
+                                if self.stop_search:
+                                    break
+                                text += page.get_text()
+                            
+                            text_cache[str(pdf_file)] = {
+                                'full_text': text,
+                                'modification_time': pdf_file.stat().st_mtime
+                            }
+                            
+                    except Exception as e:
+                        print(f"Error leyendo {pdf_file}: {str(e)}")
+                
+                # Guardar caché de texto
+                self.save_text_cache(self.folder_path.get(), text_cache)
+            
+            # 🔥 BÚSQUEDA EN CACHÉ DE TEXTO (MUY RÁPIDO)
+            self.parent.after(0, lambda: self.status_label.config(text="Buscando en caché de texto..."))
+            
+            for file_path, text_data in text_cache.items():
                 if self.stop_search:
                     break
-                    
-                # Actualizar estado
-                self.parent.after(0, lambda f=pdf_file.name, i=i, total=total_files: 
-                               self.status_label.config(text=f"Procesando {i+1}/{total_files}: {f}"))
                 
-                try:
-                    with fitz.open(pdf_file) as doc:
-                        text = ""
-                        for page in doc:
-                            if self.stop_search:
-                                break
-                            text += page.get_text()
-                        
-                        if search_string.lower() in text.lower():
-                            found_files.append(str(pdf_file))
-                            # Actualizar lista en el hilo principal
-                            self.parent.after(0, lambda f=str(pdf_file): self.results_list.insert(tk.END, f))
-                            
-                except Exception as e:
-                    print(f"Error leyendo {pdf_file}: {str(e)}")
+                if search_string.lower() in text_data['full_text'].lower():
+                    found_files.append(file_path)
+                    # Actualizar lista en el hilo principal
+                    self.parent.after(0, lambda f=file_path: self.results_list.insert(tk.END, f))
             
             # Mostrar resultados finales
-            self.parent.after(0, self.show_search_results, found_files, self.stop_search)
+            self.parent.after(0, self.show_search_results, found_files, self.stop_search, cache_used)
             
         except Exception as e:
             self.parent.after(0, lambda: messagebox.showerror("Error", f"Error durante la búsqueda: {str(e)}"))
         finally:
             self.is_searching = False
     
-    def show_search_results(self, found_files, was_cancelled):
+    def show_search_results(self, found_files, was_cancelled, cache_used):
+        cache_status = " (con caché)" if cache_used else " (sin caché - escaneo completo)"
+        
         if was_cancelled:
-            self.status_label.config(text=f"Búsqueda cancelada. Se encontraron {len(found_files)} archivos")
+            self.status_label.config(text=f"Búsqueda cancelada. Se encontraron {len(found_files)} archivos{cache_status}")
             messagebox.showinfo("Búsqueda cancelada", f"Se encontraron {len(found_files)} archivos antes de cancelar")
         elif found_files:
-            self.status_label.config(text=f"Búsqueda completada. Se encontraron {len(found_files)} archivos")
-            # 🔥 CAMBIO: No cambiar el estado del botón, ya está habilitado
+            self.status_label.config(text=f"Búsqueda completada. Se encontraron {len(found_files)} archivos{cache_status}")
             messagebox.showinfo("Resultados", f"Se encontraron {len(found_files)} archivos con el texto")
         else:
-            self.status_label.config(text="Búsqueda completada. No se encontraron archivos")
+            self.status_label.config(text=f"Búsqueda completada. No se encontraron archivos{cache_status}")
             messagebox.showinfo("Resultados", "No se encontraron archivos con el texto buscado")
     
     def open_selected_file(self):
@@ -525,7 +640,7 @@ class PDFSearchTab:
 class MetadataAnalyzerGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Analizador de Metadatos - By José Valenzuela")
+        self.root.title("Analizador de Metadatos - Caché Automático + Buscador de Texto")
         self.root.geometry("1400x1000")
         
         self.analyzer = PDFMetadataAnalyzer()
