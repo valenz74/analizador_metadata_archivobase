@@ -20,78 +20,55 @@ class PDFMetadataAnalyzer:
         self.cache_file.parent.mkdir(parents=True, exist_ok=True)
     
     def get_folder_modification_time(self, folder_path):
-        """Obtiene el tiempo de modificación de una carpeta recursivamente"""
         try:
             folder = Path(folder_path)
             if not folder.exists():
                 return None
-            
-            # Obtener el tiempo de modificación de la carpeta principal
             latest_time = folder.stat().st_mtime
-            
-            # Buscar recursivamente en subcarpetas
             for item in folder.rglob('*'):
                 if item.is_file():
                     item_time = item.stat().st_mtime
                     if item_time > latest_time:
                         latest_time = item_time
-            
             return latest_time
         except Exception as e:
             print(f"Error obteniendo tiempo de modificación de carpeta: {e}")
             return None
     
     def load_cache(self, search_folder):
-        """Carga el caché si existe y es válido - Ahora completamente automático"""
         try:
             if not self.cache_file.exists():
                 return None, "No existe archivo de caché"
-            
             with open(self.cache_file, 'r', encoding='utf-8') as f:
                 cache_data = json.load(f)
-            
-            # Verificar si la carpeta es la misma
             cached_folder = cache_data.get('search_folder')
             if cached_folder != search_folder:
                 return None, "Carpeta diferente"
-            
-            # Verificar si la carpeta ha sido modificada
             current_mod_time = self.get_folder_modification_time(search_folder)
             cached_mod_time = cache_data.get('folder_modification_time')
-            
             if current_mod_time != cached_mod_time:
                 return None, "Carpeta modificada"
-            
-            # Verificar integridad de los archivos en caché
             pdf_files = cache_data.get('pdf_files', {})
             for file_path, file_data in pdf_files.items():
                 if not Path(file_path).exists():
                     return None, "Archivo en caché no existe"
-                
-                # Verificar si el archivo ha sido modificado
                 current_file_time = Path(file_path).stat().st_mtime
                 cached_file_time = file_data.get('modification_time')
                 if current_file_time != cached_file_time:
                     return None, "Archivo modificado"
-            
             return pdf_files, "Caché válido"
-            
         except Exception as e:
             print(f"Error cargando caché: {e}")
             return None, f"Error: {str(e)}"
     
     def save_cache(self, search_folder, pdf_files):
-        """Guarda los metadatos en caché"""
         try:
-            # Convertir objetos datetime a strings para serialización JSON
             serializable_pdf_files = {}
             for file_path, file_data in pdf_files.items():
                 serializable_data = file_data.copy()
-                # Convertir datetime a string ISO format
                 if isinstance(serializable_data.get('modificado'), datetime):
                     serializable_data['modificado'] = serializable_data['modificado'].isoformat()
                 serializable_pdf_files[file_path] = serializable_data
-            
             cache_data = {
                 'search_folder': search_folder,
                 'folder_modification_time': self.get_folder_modification_time(search_folder),
@@ -100,35 +77,23 @@ class PDFMetadataAnalyzer:
                 'total_files': len(pdf_files),
                 'pdf_files': serializable_pdf_files
             }
-            
             with open(self.cache_file, 'w', encoding='utf-8') as f:
                 json.dump(cache_data, f, indent=2, ensure_ascii=False)
-            
             print(f"Caché guardado exitosamente: {len(pdf_files)} archivos")
-            
         except Exception as e:
             print(f"Error guardando caché: {e}")
     
     def get_pdf_metadata(self, pdf_path):
-        """Extrae metadatos completos de un PDF"""
         try:
             with fitz.open(pdf_path) as doc:
                 metadata = doc.metadata
-                
-                # Calcular hash SHA256 (solo para información, no para comparación)
                 with open(pdf_path, 'rb') as f:
                     file_hash = hashlib.sha256(f.read()).hexdigest()
-                
-                # Obtener información del sistema de archivos
                 file_stat = pdf_path.stat()
                 file_size = file_stat.st_size
                 file_modified = datetime.fromtimestamp(file_stat.st_mtime)
-                
-                # Formatear fecha de creación
                 creation_date = self.format_pdf_date(metadata.get('creationDate', 'No disponible'))
                 mod_date = self.format_pdf_date(metadata.get('modDate', 'No disponible'))
-                
-                # Información completa
                 full_metadata = {
                     'ruta': str(pdf_path),
                     'nombre': pdf_path.name,
@@ -145,136 +110,100 @@ class PDFMetadataAnalyzer:
                     'paginas': len(doc),
                     'modification_time': file_stat.st_mtime
                 }
-                
                 return True, full_metadata
-                
         except Exception as e:
             return False, f"Error al leer metadatos: {str(e)}"
     
     def format_pdf_date(self, pdf_date_string):
-        """Convierte el formato de fecha PDF a formato legible"""
         if pdf_date_string == 'No disponible' or not pdf_date_string:
             return 'No disponible'
-        
         try:
             if pdf_date_string.startswith('D:'):
                 date_str = pdf_date_string[2:]
-                
                 year = int(date_str[0:4]) if len(date_str) >= 4 else 2024
                 month = int(date_str[4:6]) if len(date_str) >= 6 else 1
                 day = int(date_str[6:8]) if len(date_str) >= 8 else 1
                 hour = int(date_str[8:10]) if len(date_str) >= 10 else 0
                 minute = int(date_str[10:12]) if len(date_str) >= 12 else 0
                 second = int(date_str[12:14]) if len(date_str) >= 14 else 0
-                
                 pdf_date = datetime(year, month, day, hour, minute, second)
                 return pdf_date.strftime('%Y-%m-%d %H:%M:%S')
-                
         except Exception as e:
             print(f"Error formateando fecha PDF: {pdf_date_string}, Error: {e}")
-        
         return pdf_date_string
     
     def normalize_metadata_value(self, value):
-        """Normaliza valores de metadatos para comparación"""
         if value == 'No disponible' or not value:
             return None
         return str(value).strip().lower()
     
     def find_similar_by_metadata(self, reference_metadata, search_folder, include_hash=False, min_matches=2, progress_callback=None):
-        """Busca PDFs con metadatos similares - Ahora con caché automático"""
         similar_files = []
         pdf_files_data = {}
         cache_used = False
-        
-        # SIEMPRE intentar cargar desde caché primero
         cached_data, cache_status = self.load_cache(search_folder)
         if cached_data:
             pdf_files_data = cached_data
             cache_used = True
             print(f"✓ Caché automático: {cache_status}")
-            
-            # Convertir strings de fecha de vuelta a objetos datetime para archivos en caché
             for file_path, file_data in pdf_files_data.items():
                 if 'modificado' in file_data and isinstance(file_data['modificado'], str):
                     try:
                         pdf_files_data[file_path]['modificado'] = datetime.fromisoformat(file_data['modificado'])
                     except:
-                        # Si falla la conversión, mantener el string
                         pass
         else:
             print(f"✗ Caché no disponible: {cache_status}")
-            # Escanear archivos si el caché no es válido
-            pdf_files = [f for f in Path(search_folder).rglob("*.pdf") 
-                        if not f.name.startswith('~$')]
+            pdf_files = [f for f in Path(search_folder).rglob("*.pdf") if not f.name.startswith('~$')]
             total_files = len(pdf_files)
-            
             for i, pdf_file in enumerate(pdf_files):
                 if progress_callback and hasattr(progress_callback, '__call__'):
                     progress_callback(i, total_files, f"Analizando: {pdf_file.name}")
-                
                 success, metadata = self.get_pdf_metadata(pdf_file)
                 if success:
                     pdf_files_data[str(pdf_file)] = metadata
-                
                 if i % 10 == 0:
                     print(f"Escaneando: {i}/{total_files} archivos")
-            
-            # GUARDAR CACHÉ automáticamente después del escaneo
             self.save_cache(search_folder, pdf_files_data)
-        
-        # Normalizar metadatos de referencia
         ref_creator = self.normalize_metadata_value(reference_metadata.get('creador'))
         ref_producer = self.normalize_metadata_value(reference_metadata.get('productor'))
         ref_creation_date = self.normalize_metadata_value(reference_metadata.get('fecha_creacion'))
         ref_hash = reference_metadata.get('hash_sha256') if include_hash else None
-        
         total_files_to_compare = len(pdf_files_data)
-        
-        # Buscar coincidencias
         for i, (file_path, metadata) in enumerate(pdf_files_data.items()):
             if file_path == self.reference_file:
                 continue
-            
             if progress_callback and hasattr(progress_callback, '__call__'):
                 progress_callback(i, total_files_to_compare, f"Comparando: {Path(file_path).name}")
-            
             comp_creator = self.normalize_metadata_value(metadata.get('creador'))
             comp_producer = self.normalize_metadata_value(metadata.get('productor'))
             comp_creation_date = self.normalize_metadata_value(metadata.get('fecha_creacion'))
             comp_hash = metadata.get('hash_sha256') if include_hash else None
-            
             matches = 0
             total_possible = 3 + (1 if include_hash else 0)
             match_details = []
-            
-            # Campos base
             creator_match = False
-            producer_match = False  
+            producer_match = False
             creation_date_match = False
             hash_match = False
-            
             if ref_creator and comp_creator and ref_creator == comp_creator:
                 matches += 1
                 creator_match = True
                 match_details.append("✓ Creator")
             else:
                 match_details.append("✗ Creator")
-            
             if ref_producer and comp_producer and ref_producer == comp_producer:
                 matches += 1
                 producer_match = True
                 match_details.append("✓ Producer")
             else:
                 match_details.append("✗ Producer")
-            
             if ref_creation_date and comp_creation_date and ref_creation_date == comp_creation_date:
                 matches += 1
                 creation_date_match = True
                 match_details.append("✓ Create Date")
             else:
                 match_details.append("✗ Create Date")
-            
             if include_hash:
                 if ref_hash and comp_hash and ref_hash == comp_hash:
                     matches += 1
@@ -282,27 +211,20 @@ class PDFMetadataAnalyzer:
                     match_details.append("✓ Hash SHA256")
                 else:
                     match_details.append("✗ Hash SHA256")
-            
-            # 🔥 NUEVA LÓGICA MEJORADA para detección de trampas
             similarity_level = "BAJA"
             is_similar = False
-            
-            if min_matches == 1:  # Nivel Bajo - Cualquier coincidencia
+            if min_matches == 1:
                 is_similar = matches >= 1
                 similarity_level = "BAJA"
-            
-            elif min_matches == 2:  # Nivel Medio - CREATE DATE OBLIGATORIO
-                # Requiere Create Date + al menos otro campo
+            elif min_matches == 2:
                 if creation_date_match and (creator_match or producer_match or (include_hash and hash_match)):
                     is_similar = True
                     similarity_level = "MEDIA"
                 else:
                     is_similar = False
-            
-            elif min_matches >= 3:  # Nivel Alto - Todas las coincidencias
+            elif min_matches >= 3:
                 is_similar = matches >= min_matches
                 similarity_level = "ALTA"
-            
             if is_similar:
                 similar_files.append({
                     'metadata': metadata,
@@ -313,7 +235,6 @@ class PDFMetadataAnalyzer:
                     'ruta_completa': file_path,
                     'from_cache': cache_used
                 })
-        
         similar_files.sort(key=lambda x: x['matches'], reverse=True)
         return similar_files, cache_used
 
@@ -324,71 +245,52 @@ class PDFSearchTab:
         self.stop_search = False
         self.cache_file = Path("C:/Users/Jose/Proyectos/analizador_metadata_archivobase/cache_text.json")
         self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+        self.wait_dialog = None
         self.setup_search_tab()
     
     def get_folder_modification_time(self, folder_path):
-        """Obtiene el tiempo de modificación de una carpeta recursivamente"""
         try:
             folder = Path(folder_path)
             if not folder.exists():
                 return None
-            
-            # Obtener el tiempo de modificación de la carpeta principal
             latest_time = folder.stat().st_mtime
-            
-            # Buscar recursivamente en subcarpetas
             for item in folder.rglob('*'):
                 if item.is_file():
                     item_time = item.stat().st_mtime
                     if item_time > latest_time:
                         latest_time = item_time
-            
             return latest_time
         except Exception as e:
             print(f"Error obteniendo tiempo de modificación de carpeta: {e}")
             return None
     
     def load_text_cache(self, search_folder):
-        """Carga el caché de texto si existe y es válido"""
         try:
             if not self.cache_file.exists():
                 return None, "No existe archivo de caché de texto"
-            
             with open(self.cache_file, 'r', encoding='utf-8') as f:
                 cache_data = json.load(f)
-            
-            # Verificar si la carpeta es la misma
             cached_folder = cache_data.get('search_folder')
             if cached_folder != search_folder:
                 return None, "Carpeta diferente"
-            
-            # Verificar si la carpeta ha sido modificada
             current_mod_time = self.get_folder_modification_time(search_folder)
             cached_mod_time = cache_data.get('folder_modification_time')
-            
             if current_mod_time != cached_mod_time:
                 return None, "Carpeta modificada"
-            
-            # Verificar integridad de los archivos en caché
             text_cache = cache_data.get('text_cache', {})
             for file_path, file_data in text_cache.items():
                 if not Path(file_path).exists():
                     return None, "Archivo en caché no existe"
-                
-                # Verificar si el archivo ha sido modificado
                 current_file_time = Path(file_path).stat().st_mtime
                 cached_file_time = file_data.get('modification_time')
                 if current_file_time != cached_file_time:
                     return None, "Archivo modificado"
-            
             return text_cache, "Caché de texto válido"
-            
         except Exception as e:
             print(f"Error cargando caché de texto: {e}")
             return None, f"Error: {str(e)}"
     
     def save_text_cache(self, search_folder, text_cache):
-        """Guarda el texto extraído en caché"""
         try:
             cache_data = {
                 'search_folder': search_folder,
@@ -398,85 +300,99 @@ class PDFSearchTab:
                 'total_files': len(text_cache),
                 'text_cache': text_cache
             }
-            
             with open(self.cache_file, 'w', encoding='utf-8') as f:
                 json.dump(cache_data, f, indent=2, ensure_ascii=False)
-            
             print(f"Caché de texto guardado exitosamente: {len(text_cache)} archivos")
-            
         except Exception as e:
             print(f"Error guardando caché de texto: {e}")
     
     def setup_search_tab(self):
-        # Variables
-        self.folder_path = tk.StringVar()
-        self.search_text = tk.StringVar()
+        # Variables para los 5 textos de búsqueda
+        self.search_texts = [tk.StringVar() for _ in range(5)]
         
-        # Marco principal de búsqueda
-        search_main_frame = ttk.Frame(self.parent)
-        search_main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Marco principal con dos columnas
+        main_container = ttk.Frame(self.parent)
+        main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Columna izquierda: configuración
+        left_frame = ttk.Frame(main_container)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=(0, 10))
         
         # Título
-        title_label = ttk.Label(search_main_frame, 
+        title_label = ttk.Label(left_frame, 
                                text="🔍 Buscador de Texto en PDFs - Con Caché Automático", 
                                font=("Arial", 12, "bold"))
         title_label.pack(pady=(0, 15))
         
-        # Frame de selección
-        selection_frame = ttk.LabelFrame(search_main_frame, text="Configuración de Búsqueda", padding="10")
-        selection_frame.pack(fill=tk.X, pady=5)
-        
         # Selección de carpeta
-        ttk.Label(selection_frame, text="Carpeta:").grid(row=0, column=0, sticky=tk.W, pady=5)
-        folder_entry = ttk.Entry(selection_frame, textvariable=self.folder_path, width=60)
-        folder_entry.grid(row=0, column=1, padx=5, pady=5, sticky=(tk.W, tk.E))
-        ttk.Button(selection_frame, text="📁 Seleccionar Carpeta", 
-                  command=self.select_folder).grid(row=0, column=2, pady=5)
+        folder_frame = ttk.LabelFrame(left_frame, text="Carpeta", padding="5")
+        folder_frame.pack(fill=tk.X, pady=5)
         
-        # Texto de búsqueda
-        ttk.Label(selection_frame, text="Texto a buscar:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        search_entry = ttk.Entry(selection_frame, textvariable=self.search_text, width=60)
-        search_entry.grid(row=1, column=1, padx=5, pady=5, sticky=(tk.W, tk.E))
+        self.folder_path = tk.StringVar()
+        folder_entry = ttk.Entry(folder_frame, textvariable=self.folder_path, width=50)
+        folder_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        ttk.Button(folder_frame, text="📁 Seleccionar", 
+                  command=self.select_folder).pack(side=tk.RIGHT)
         
-        # Frame para botones de búsqueda
-        button_frame = ttk.Frame(selection_frame)
-        button_frame.grid(row=1, column=2, pady=5)
+        # Campos de texto a buscar
+        texts_frame = ttk.LabelFrame(left_frame, text="Textos a buscar (OR)", padding="5")
+        texts_frame.pack(fill=tk.X, pady=5)
         
-        self.search_button = ttk.Button(button_frame, text="🔍 Buscar", 
+        for i in range(5):
+            row_frame = ttk.Frame(texts_frame)
+            row_frame.pack(fill=tk.X, pady=2)
+            ttk.Label(row_frame, text=f"Texto {i+1}:").pack(side=tk.LEFT, padx=(0, 5))
+            entry = ttk.Entry(row_frame, textvariable=self.search_texts[i], width=40)
+            entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # Botones de control
+        buttons_frame = ttk.Frame(left_frame)
+        buttons_frame.pack(fill=tk.X, pady=10)
+        
+        self.search_button = ttk.Button(buttons_frame, text="🔍 Buscar", 
                                        command=self.start_search)
         self.search_button.pack(side=tk.LEFT, padx=2)
         
-        self.stop_button = ttk.Button(button_frame, text="⏹️ Detener", 
+        self.stop_button = ttk.Button(buttons_frame, text="⏹️ Detener", 
                                      command=self.stop_search_process, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=2)
         
-        selection_frame.columnconfigure(1, weight=1)
+        # Nuevo botón Limpiar
+        self.clear_button = ttk.Button(buttons_frame, text="🗑️ Limpiar", 
+                                       command=self.clear_text_fields)
+        self.clear_button.pack(side=tk.LEFT, padx=2)
         
-        # Progress bar
-        progress_frame = ttk.Frame(search_main_frame)
-        progress_frame.pack(fill=tk.X, pady=10)
+        # Opción de apagado forzoso
+        self.shutdown_var = tk.BooleanVar(value=False)
+        shutdown_check = ttk.Checkbutton(left_frame, text="Apagar PC al finalizar la búsqueda", 
+                                         variable=self.shutdown_var)
+        shutdown_check.pack(anchor=tk.W, pady=5)
         
-        self.progress = ttk.Progressbar(progress_frame, mode='indeterminate')
-        self.progress.pack(fill=tk.X, pady=5)
+        # Barra de progreso (eliminada la animación, se usará ventana emergente)
+        # Solo mantenemos una etiqueta de estado simple
+        self.status_label = ttk.Label(left_frame, text="Listo para buscar")
+        self.status_label.pack(pady=5)
         
-        # Label de estado
-        self.status_label = ttk.Label(progress_frame, text="Listo para buscar")
-        self.status_label.pack(pady=2)
+        # Columna derecha: resultados y detalles (usando PanedWindow)
+        right_frame = ttk.Frame(main_container)
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
         
-        # Lista de resultados
-        results_frame = ttk.LabelFrame(search_main_frame, text="Resultados de Búsqueda", padding="10")
-        results_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        # Crear un PanedWindow vertical para dividir resultados y detalles
+        paned = ttk.PanedWindow(right_frame, orient=tk.VERTICAL)
+        paned.pack(fill=tk.BOTH, expand=True)
+        
+        # Panel superior: resultados de búsqueda
+        results_frame = ttk.LabelFrame(paned, text="Resultados de Búsqueda", padding="5")
+        paned.add(results_frame, weight=3)
         
         # Frame para controles de resultados
         results_controls = ttk.Frame(results_frame)
-        results_controls.pack(fill=tk.X, pady=(0, 10))
+        results_controls.pack(fill=tk.X, pady=(0, 5))
         
         ttk.Label(results_controls, text="Archivos encontrados:").pack(side=tk.LEFT)
-        
-        # Botón siempre habilitado
         self.open_selected_btn = ttk.Button(results_controls, text="📖 Abrir Seleccionado", 
                                           command=self.open_selected_file, state=tk.NORMAL)
-        self.open_selected_btn.pack(side=tk.RIGHT, padx=(10, 0))
+        self.open_selected_btn.pack(side=tk.RIGHT, padx=(5, 0))
         
         # Listbox con scrollbar
         listbox_frame = ttk.Frame(results_frame)
@@ -489,8 +405,35 @@ class PDFSearchTab:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.results_list.configure(yscrollcommand=scrollbar.set)
         
-        # Bind para abrir archivo con doble click
-        self.results_list.bind('<Double-Button-1>', lambda e: self.open_selected_file())
+        # Panel inferior: detalles del archivo seleccionado
+        details_frame = ttk.LabelFrame(paned, text="🔍 Detalles del archivo seleccionado", padding="5")
+        paned.add(details_frame, weight=2)
+        
+        # Text widget con scrollbars
+        text_container = ttk.Frame(details_frame)
+        text_container.pack(fill=tk.BOTH, expand=True)
+        
+        self.details_text = tk.Text(text_container, wrap=tk.WORD, font=("Consolas", 9))
+        self.details_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        text_scroll_y = ttk.Scrollbar(text_container, orient=tk.VERTICAL, command=self.details_text.yview)
+        text_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        self.details_text.configure(yscrollcommand=text_scroll_y.set)
+        
+        text_scroll_x = ttk.Scrollbar(details_frame, orient=tk.HORIZONTAL, command=self.details_text.xview)
+        text_scroll_x.pack(fill=tk.X)
+        self.details_text.configure(xscrollcommand=text_scroll_x.set)
+        
+        # Bind para selección en la lista
+        self.results_list.bind('<<ListboxSelect>>', self.on_result_select)
+        
+        # Almacenar información de coincidencias por archivo
+        self.file_match_info = {}  # {file_path: [list_of_matching_terms]}
+    
+    def clear_text_fields(self):
+        """Limpia los cinco campos de texto."""
+        for var in self.search_texts:
+            var.set("")
     
     def select_folder(self):
         folder = filedialog.askdirectory(title="Seleccionar carpeta para buscar en PDFs")
@@ -498,31 +441,51 @@ class PDFSearchTab:
             self.folder_path.set(folder)
     
     def start_search(self):
+        search_strings = [s.get().strip() for s in self.search_texts if s.get().strip()]
+        if not search_strings:
+            messagebox.showwarning("Advertencia", "Ingresa al menos un texto a buscar")
+            return
         if not self.folder_path.get():
             messagebox.showwarning("Advertencia", "Selecciona una carpeta primero")
-            return
-            
-        if not self.search_text.get().strip():
-            messagebox.showwarning("Advertencia", "Ingresa un texto a buscar")
             return
         
         # Limpiar resultados anteriores
         self.results_list.delete(0, tk.END)
+        self.details_text.delete(1.0, tk.END)
+        self.file_match_info.clear()
         
-        # Configurar interfaz para búsqueda
+        # Configurar interfaz
         self.is_searching = True
         self.stop_search = False
         self.search_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
-        self.progress.start(10)
-        self.status_label.config(text="Buscando...")
+        self.status_label.config(text="Iniciando búsqueda...")
         
-        # Ejecutar búsqueda en hilo separado
-        search_thread = threading.Thread(target=self.search_pdfs_thread)
+        # Mostrar ventana emergente modal
+        self.wait_dialog = tk.Toplevel(self.parent)
+        self.wait_dialog.title("Buscando")
+        self.wait_dialog.geometry("300x100")
+        self.wait_dialog.transient(self.parent)
+        self.wait_dialog.grab_set()
+        self.wait_dialog.resizable(False, False)
+        
+        # Centrar ventana
+        self.wait_dialog.update_idletasks()
+        x = self.parent.winfo_x() + (self.parent.winfo_width() // 2) - (300 // 2)
+        y = self.parent.winfo_y() + (self.parent.winfo_height() // 2) - (100 // 2)
+        self.wait_dialog.geometry(f"+{x}+{y}")
+        
+        # Etiqueta de espera
+        ttk.Label(self.wait_dialog, text="Buscando Coincidencias...\nEspere...", 
+                  font=("Arial", 12), justify=tk.CENTER).pack(expand=True, fill=tk.BOTH, padx=20, pady=20)
+        
+        # Guardar hora de inicio
+        self.start_time = datetime.now()
+        
+        # Lanzar hilo de búsqueda
+        search_thread = threading.Thread(target=self.search_pdfs_thread, args=(search_strings,))
         search_thread.daemon = True
         search_thread.start()
-        
-        # Verificar estado del hilo periódicamente
         self.check_search_thread()
     
     def stop_search_process(self):
@@ -531,45 +494,51 @@ class PDFSearchTab:
     
     def check_search_thread(self):
         if self.is_searching:
-            # Revisar nuevamente en 100ms
             self.parent.after(100, self.check_search_thread)
         else:
-            # La búsqueda terminó
-            self.progress.stop()
+            # Cerrar ventana emergente si existe
+            if self.wait_dialog and self.wait_dialog.winfo_exists():
+                self.wait_dialog.destroy()
+                self.wait_dialog = None
             self.search_button.config(state=tk.NORMAL)
             self.stop_button.config(state=tk.DISABLED)
     
-    def search_pdfs_thread(self):
+    def search_pdfs_thread(self, search_strings):
         try:
             found_files = []
-            search_string = self.search_text.get().strip()
-            
-            # Excluir archivos temporales que comienzan con ~$
-            pdf_files = [f for f in Path(self.folder_path.get()).rglob("*.pdf") 
-                        if not f.name.startswith('~$')]
+            pdf_files = [f for f in Path(self.folder_path.get()).rglob("*.pdf") if not f.name.startswith('~$')]
             total_files = len(pdf_files)
-            
-            # 🔥 NUEVO: CARGAR CACHÉ DE TEXTO
             text_cache = {}
             cache_used = False
-            
             cached_data, cache_status = self.load_text_cache(self.folder_path.get())
             if cached_data:
                 text_cache = cached_data
                 cache_used = True
-                print(f"✓ Caché de texto: {cache_status}")
-                self.parent.after(0, lambda: self.status_label.config(text=f"Usando caché de texto - Buscando en {len(text_cache)} archivos..."))
+                # Buscar en caché
+                total_to_process = len(text_cache)
+                processed = 0
+                for file_path, text_data in text_cache.items():
+                    if self.stop_search:
+                        break
+                    processed += 1
+                    full_text = text_data['full_text'].lower()
+                    matching_terms = []
+                    for term in search_strings:
+                        if term.lower() in full_text:
+                            matching_terms.append(term)
+                    if matching_terms:
+                        found_files.append((file_path, matching_terms))
+                        self.parent.after(0, lambda f=file_path, m=matching_terms: self.add_result(f, m))
+                    # Actualizar estado opcionalmente
+                    if processed % 500 == 0:
+                        self.parent.after(0, lambda: self.status_label.config(text=f"Buscando... {processed}/{total_to_process} archivos"))
             else:
-                print(f"✗ Caché de texto no disponible: {cache_status}")
-                # Si no hay caché válido, extraer texto de todos los archivos
-                text_cache = {}
+                # Extraer texto de todos los PDFs
                 for i, pdf_file in enumerate(pdf_files):
                     if self.stop_search:
                         break
-                        
                     self.parent.after(0, lambda f=pdf_file.name, i=i, total=total_files: 
                                    self.status_label.config(text=f"Extrayendo texto {i+1}/{total_files}: {f}"))
-                    
                     try:
                         with fitz.open(pdf_file) as doc:
                             text = ""
@@ -577,57 +546,102 @@ class PDFSearchTab:
                                 if self.stop_search:
                                     break
                                 text += page.get_text()
-                            
                             text_cache[str(pdf_file)] = {
                                 'full_text': text,
                                 'modification_time': pdf_file.stat().st_mtime
                             }
-                            
                     except Exception as e:
                         print(f"Error leyendo {pdf_file}: {str(e)}")
-                
-                # Guardar caché de texto
                 self.save_text_cache(self.folder_path.get(), text_cache)
+                # Buscar en caché recién creado
+                self.parent.after(0, lambda: self.status_label.config(text="Buscando en caché de texto..."))
+                total_to_search = len(text_cache)
+                processed_search = 0
+                for file_path, text_data in text_cache.items():
+                    if self.stop_search:
+                        break
+                    processed_search += 1
+                    full_text = text_data['full_text'].lower()
+                    matching_terms = []
+                    for term in search_strings:
+                        if term.lower() in full_text:
+                            matching_terms.append(term)
+                    if matching_terms:
+                        found_files.append((file_path, matching_terms))
+                        self.parent.after(0, lambda f=file_path, m=matching_terms: self.add_result(f, m))
+                    if processed_search % 500 == 0:
+                        self.parent.after(0, lambda: self.status_label.config(text=f"Buscando... {processed_search}/{total_to_search} archivos"))
             
-            # 🔥 BÚSQUEDA EN CACHÉ DE TEXTO (MUY RÁPIDO)
-            self.parent.after(0, lambda: self.status_label.config(text="Buscando en caché de texto..."))
-            
-            for file_path, text_data in text_cache.items():
-                if self.stop_search:
-                    break
-                
-                if search_string.lower() in text_data['full_text'].lower():
-                    found_files.append(file_path)
-                    # Actualizar lista en el hilo principal
-                    self.parent.after(0, lambda f=file_path: self.results_list.insert(tk.END, f))
-            
-            # Mostrar resultados finales
             self.parent.after(0, self.show_search_results, found_files, self.stop_search, cache_used)
-            
         except Exception as e:
             self.parent.after(0, lambda: messagebox.showerror("Error", f"Error durante la búsqueda: {str(e)}"))
         finally:
             self.is_searching = False
     
-    def show_search_results(self, found_files, was_cancelled, cache_used):
-        cache_status = " (con caché)" if cache_used else " (sin caché - escaneo completo)"
-        
-        if was_cancelled:
-            self.status_label.config(text=f"Búsqueda cancelada. Se encontraron {len(found_files)} archivos{cache_status}")
-            messagebox.showinfo("Búsqueda cancelada", f"Se encontraron {len(found_files)} archivos antes de cancelar")
-        elif found_files:
-            self.status_label.config(text=f"Búsqueda completada. Se encontraron {len(found_files)} archivos{cache_status}")
-            messagebox.showinfo("Resultados", f"Se encontraron {len(found_files)} archivos con el texto")
+    def add_result(self, file_path, matching_terms):
+        self.results_list.insert(tk.END, file_path)
+        self.file_match_info[file_path] = matching_terms
+    
+    def on_result_select(self, event):
+        selection = self.results_list.curselection()
+        if not selection:
+            return
+        file_path = self.results_list.get(selection[0])
+        matching_terms = self.file_match_info.get(file_path, [])
+        self.details_text.delete(1.0, tk.END)
+        if matching_terms:
+            self.details_text.insert(tk.END, "Coincidencias encontradas:\n" + "\n".join(f"• {term}" for term in matching_terms))
         else:
-            self.status_label.config(text=f"Búsqueda completada. No se encontraron archivos{cache_status}")
-            messagebox.showinfo("Resultados", "No se encontraron archivos con el texto buscado")
+            self.details_text.insert(tk.END, "No hay información de coincidencias.")
+    
+    def show_search_results(self, found_files, was_cancelled, cache_used):
+        # Calcular tiempo final
+        end_time = datetime.now()
+        elapsed = (end_time - self.start_time).total_seconds()
+        elapsed_str = f"{int(elapsed//60)}m {int(elapsed%60)}s" if elapsed >= 60 else f"{elapsed:.1f}s"
+        cache_status = " (con caché)" if cache_used else " (sin caché - escaneo completo)"
+        if was_cancelled:
+            msg = f"Búsqueda cancelada. Se encontraron {len(found_files)} archivos{cache_status} - Tiempo: {elapsed_str}"
+            self.status_label.config(text=msg)
+            messagebox.showinfo("Búsqueda cancelada", msg)
+            success_status = "cancelada"
+        elif found_files:
+            msg = f"Búsqueda completada. Se encontraron {len(found_files)} archivos{cache_status} - Tiempo: {elapsed_str}"
+            self.status_label.config(text=msg)
+            messagebox.showinfo("Resultados", msg)
+            success_status = "completada (con éxito)"
+        else:
+            msg = f"Búsqueda completada. No se encontraron archivos{cache_status} - Tiempo: {elapsed_str}"
+            self.status_label.config(text=msg)
+            messagebox.showinfo("Resultados", msg)
+            success_status = "completada (sin resultados)"
+        
+        # Apagado automático si está marcado
+        if self.shutdown_var.get() and not was_cancelled:
+            # Registrar información en archivo apagado.txt
+            desktop = Path("C:/Users/Jose/Desktop")
+            log_file = desktop / "apagado.txt"
+            try:
+                with open(log_file, 'w', encoding='utf-8') as f:
+                    f.write("=== REGISTRO DE APAGADO AUTOMÁTICO ===\n")
+                    f.write(f"Estado de la búsqueda: {success_status}\n")
+                    f.write(f"Cantidad de archivos procesados: {len(found_files)}\n")
+                    f.write(f"Hora de inicio: {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"Hora de finalización: {end_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"Duración: {elapsed_str}\n")
+                    f.write(f"Hora de apagado programado: {(end_time + timedelta(seconds=10)).strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write("======================================\n")
+            except Exception as e:
+                print(f"Error escribiendo archivo de apagado: {e}")
+            self.status_label.config(text="Apagando el equipo en 10 segundos...")
+            messagebox.showinfo("Apagado", "El equipo se apagará en 10 segundos. Guarda tu trabajo.")
+            os.system("shutdown /s /t 10")
     
     def open_selected_file(self):
         selection = self.results_list.curselection()
         if not selection:
             messagebox.showwarning("Advertencia", "Selecciona un archivo de la lista")
             return
-            
         file_path = self.results_list.get(selection[0])
         try:
             os.startfile(file_path)
@@ -703,7 +717,7 @@ class MetadataAnalyzerGUI:
         
         ttk.Label(left_config, text="Nivel de detección:").pack(anchor=tk.W, pady=(10, 5))
         
-        self.similarity_var = tk.StringVar(value="media")  # PREDETERMINADO: MEDIA
+        self.similarity_var = tk.StringVar(value="media")
         similarity_frame = ttk.Frame(left_config)
         similarity_frame.pack(fill=tk.X, pady=5)
         
@@ -768,19 +782,15 @@ class MetadataAnalyzerGUI:
                                    command=self.clear_all)
         self.clear_btn.pack(side=tk.LEFT)
         
-        # NOTEBOOK CON PESTAÑAS
         results_notebook = ttk.Notebook(main_frame)
         results_notebook.grid(row=5, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=10)
         
-        # Pestaña de metadatos de referencia
         self.reference_frame = ttk.Frame(results_notebook, padding="10")
         results_notebook.add(self.reference_frame, text="📋 Metadatos de Referencia")
         
-        # Pestaña de archivos detectados
         self.results_frame = ttk.Frame(results_notebook, padding="10")
         results_notebook.add(self.results_frame, text="📊 Archivos Detectados")
         
-        # NUEVA PESTAÑA: Buscador de texto en PDFs
         self.search_frame = ttk.Frame(results_notebook, padding="10")
         results_notebook.add(self.search_frame, text="🔍 Buscador de Texto")
         
@@ -791,7 +801,6 @@ class MetadataAnalyzerGUI:
         self.setup_search_frame()
     
     def setup_search_frame(self):
-        """Configura la pestaña de búsqueda de texto"""
         self.pdf_search_tab = PDFSearchTab(self.search_frame)
     
     def setup_reference_frame(self):
@@ -869,12 +878,9 @@ class MetadataAnalyzerGUI:
         self.results_tree.bind('<<TreeviewSelect>>', self.on_tree_select)
     
     def update_progress(self, current, total, current_file):
-        """Actualiza la barra de progreso y la información actual"""
         if total > 0:
             progress_percent = (current / total) * 100
             self.progress['value'] = progress_percent
-            
-            # Actualizar etiquetas en el hilo principal
             self.root.after(0, lambda: self.status_label.config(text=f"Procesando: {current}/{total} archivos"))
             self.root.after(0, lambda: self.current_file_label.config(text=f"Archivo: {current_file}"))
     
@@ -986,7 +992,6 @@ class MetadataAnalyzerGUI:
         
         include_hash = self.include_hash_var.get()
         
-        # Determinar nivel mínimo basado en la selección
         if self.similarity_var.get() == "baja":
             min_matches = 1
             nivel_text = "BAJA (1+ coincidencia)"
@@ -1088,12 +1093,11 @@ class MetadataAnalyzerGUI:
         try:
             include_hash = self.include_hash_var.get()
             
-            # Determinar nivel mínimo basado en la selección
             if self.similarity_var.get() == "baja":
                 min_matches = 1
             elif self.similarity_var.get() == "media":
                 min_matches = 2
-            else:  # alta
+            else:
                 min_matches = 3
             
             self.status_label.config(text="Iniciando análisis con caché automático...")
