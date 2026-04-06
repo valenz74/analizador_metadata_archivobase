@@ -246,6 +246,7 @@ class PDFSearchTab:
         self.cache_file = Path("C:/Users/Jose/Proyectos/analizador_metadata_archivobase/cache_text.json")
         self.cache_file.parent.mkdir(parents=True, exist_ok=True)
         self.wait_dialog = None
+        self.progress_label = None
         self.setup_search_tab()
     
     def get_folder_modification_time(self, folder_path):
@@ -357,7 +358,7 @@ class PDFSearchTab:
                                      command=self.stop_search_process, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=2)
         
-        # Nuevo botón Limpiar
+        # Botón Limpiar
         self.clear_button = ttk.Button(buttons_frame, text="🗑️ Limpiar", 
                                        command=self.clear_text_fields)
         self.clear_button.pack(side=tk.LEFT, padx=2)
@@ -368,8 +369,7 @@ class PDFSearchTab:
                                          variable=self.shutdown_var)
         shutdown_check.pack(anchor=tk.W, pady=5)
         
-        # Barra de progreso (eliminada la animación, se usará ventana emergente)
-        # Solo mantenemos una etiqueta de estado simple
+        # Etiqueta de estado
         self.status_label = ttk.Label(left_frame, text="Listo para buscar")
         self.status_label.pack(pady=5)
         
@@ -461,23 +461,28 @@ class PDFSearchTab:
         self.stop_button.config(state=tk.NORMAL)
         self.status_label.config(text="Iniciando búsqueda...")
         
-        # Mostrar ventana emergente modal
+        # Mostrar ventana emergente modal con progreso
         self.wait_dialog = tk.Toplevel(self.parent)
         self.wait_dialog.title("Buscando")
-        self.wait_dialog.geometry("300x100")
+        self.wait_dialog.geometry("400x120")
         self.wait_dialog.transient(self.parent)
         self.wait_dialog.grab_set()
         self.wait_dialog.resizable(False, False)
         
         # Centrar ventana
         self.wait_dialog.update_idletasks()
-        x = self.parent.winfo_x() + (self.parent.winfo_width() // 2) - (300 // 2)
-        y = self.parent.winfo_y() + (self.parent.winfo_height() // 2) - (100 // 2)
+        x = self.parent.winfo_x() + (self.parent.winfo_width() // 2) - (400 // 2)
+        y = self.parent.winfo_y() + (self.parent.winfo_height() // 2) - (120 // 2)
         self.wait_dialog.geometry(f"+{x}+{y}")
         
-        # Etiqueta de espera
-        ttk.Label(self.wait_dialog, text="Buscando Coincidencias...\nEspere...", 
-                  font=("Arial", 12), justify=tk.CENTER).pack(expand=True, fill=tk.BOTH, padx=20, pady=20)
+        # Etiqueta de espera y progreso
+        label_msg = ttk.Label(self.wait_dialog, text="Buscando Coincidencias...", 
+                              font=("Arial", 10, "bold"))
+        label_msg.pack(pady=(15, 5))
+        
+        self.progress_label = ttk.Label(self.wait_dialog, text="Preparando...", 
+                                        font=("Arial", 9))
+        self.progress_label.pack(pady=5)
         
         # Guardar hora de inicio
         self.start_time = datetime.now()
@@ -487,6 +492,11 @@ class PDFSearchTab:
         search_thread.daemon = True
         search_thread.start()
         self.check_search_thread()
+    
+    def update_waiting_dialog(self, text):
+        """Actualiza el texto de progreso en la ventana emergente."""
+        if self.wait_dialog and self.wait_dialog.winfo_exists():
+            self.progress_label.config(text=text)
     
     def stop_search_process(self):
         self.stop_search = True
@@ -514,13 +524,16 @@ class PDFSearchTab:
             if cached_data:
                 text_cache = cached_data
                 cache_used = True
-                # Buscar en caché
+                # Búsqueda directa en caché
                 total_to_process = len(text_cache)
                 processed = 0
                 for file_path, text_data in text_cache.items():
                     if self.stop_search:
                         break
                     processed += 1
+                    # Actualizar ventana emergente
+                    self.parent.after(0, lambda p=processed, t=total_to_process: 
+                                   self.update_waiting_dialog(f"Procesando archivo {p} de {t}"))
                     full_text = text_data['full_text'].lower()
                     matching_terms = []
                     for term in search_strings:
@@ -529,16 +542,13 @@ class PDFSearchTab:
                     if matching_terms:
                         found_files.append((file_path, matching_terms))
                         self.parent.after(0, lambda f=file_path, m=matching_terms: self.add_result(f, m))
-                    # Actualizar estado opcionalmente
-                    if processed % 500 == 0:
-                        self.parent.after(0, lambda: self.status_label.config(text=f"Buscando... {processed}/{total_to_process} archivos"))
             else:
-                # Extraer texto de todos los PDFs
+                # Fase 1: extraer texto de todos los PDFs
                 for i, pdf_file in enumerate(pdf_files):
                     if self.stop_search:
                         break
-                    self.parent.after(0, lambda f=pdf_file.name, i=i, total=total_files: 
-                                   self.status_label.config(text=f"Extrayendo texto {i+1}/{total_files}: {f}"))
+                    self.parent.after(0, lambda i=i, t=total_files: 
+                                   self.update_waiting_dialog(f"Extrayendo texto {i+1} de {t}"))
                     try:
                         with fitz.open(pdf_file) as doc:
                             text = ""
@@ -553,14 +563,16 @@ class PDFSearchTab:
                     except Exception as e:
                         print(f"Error leyendo {pdf_file}: {str(e)}")
                 self.save_text_cache(self.folder_path.get(), text_cache)
-                # Buscar en caché recién creado
-                self.parent.after(0, lambda: self.status_label.config(text="Buscando en caché de texto..."))
+                
+                # Fase 2: buscar en caché recién creado
                 total_to_search = len(text_cache)
                 processed_search = 0
                 for file_path, text_data in text_cache.items():
                     if self.stop_search:
                         break
                     processed_search += 1
+                    self.parent.after(0, lambda p=processed_search, t=total_to_search: 
+                                   self.update_waiting_dialog(f"Buscando archivo {p} de {t}"))
                     full_text = text_data['full_text'].lower()
                     matching_terms = []
                     for term in search_strings:
@@ -569,8 +581,6 @@ class PDFSearchTab:
                     if matching_terms:
                         found_files.append((file_path, matching_terms))
                         self.parent.after(0, lambda f=file_path, m=matching_terms: self.add_result(f, m))
-                    if processed_search % 500 == 0:
-                        self.parent.after(0, lambda: self.status_label.config(text=f"Buscando... {processed_search}/{total_to_search} archivos"))
             
             self.parent.after(0, self.show_search_results, found_files, self.stop_search, cache_used)
         except Exception as e:
@@ -600,31 +610,35 @@ class PDFSearchTab:
         elapsed = (end_time - self.start_time).total_seconds()
         elapsed_str = f"{int(elapsed//60)}m {int(elapsed%60)}s" if elapsed >= 60 else f"{elapsed:.1f}s"
         cache_status = " (con caché)" if cache_used else " (sin caché - escaneo completo)"
+        
+        # Apagado automático si está marcado y no se canceló
+        shutdown_enabled = self.shutdown_var.get() and not was_cancelled
+        
         if was_cancelled:
             msg = f"Búsqueda cancelada. Se encontraron {len(found_files)} archivos{cache_status} - Tiempo: {elapsed_str}"
             self.status_label.config(text=msg)
-            messagebox.showinfo("Búsqueda cancelada", msg)
-            success_status = "cancelada"
+            if not shutdown_enabled:
+                messagebox.showinfo("Búsqueda cancelada", msg)
         elif found_files:
             msg = f"Búsqueda completada. Se encontraron {len(found_files)} archivos{cache_status} - Tiempo: {elapsed_str}"
             self.status_label.config(text=msg)
-            messagebox.showinfo("Resultados", msg)
-            success_status = "completada (con éxito)"
+            if not shutdown_enabled:
+                messagebox.showinfo("Resultados", msg)
         else:
             msg = f"Búsqueda completada. No se encontraron archivos{cache_status} - Tiempo: {elapsed_str}"
             self.status_label.config(text=msg)
-            messagebox.showinfo("Resultados", msg)
-            success_status = "completada (sin resultados)"
+            if not shutdown_enabled:
+                messagebox.showinfo("Resultados", msg)
         
-        # Apagado automático si está marcado
-        if self.shutdown_var.get() and not was_cancelled:
+        # Registrar apagado y ejecutar shutdown (sin esperar OK del messagebox)
+        if shutdown_enabled:
             # Registrar información en archivo apagado.txt
             desktop = Path("C:/Users/Jose/Desktop")
             log_file = desktop / "apagado.txt"
             try:
                 with open(log_file, 'w', encoding='utf-8') as f:
                     f.write("=== REGISTRO DE APAGADO AUTOMÁTICO ===\n")
-                    f.write(f"Estado de la búsqueda: {success_status}\n")
+                    f.write(f"Estado de la búsqueda: {'completada con éxito' if found_files else 'completada sin resultados'}\n")
                     f.write(f"Cantidad de archivos procesados: {len(found_files)}\n")
                     f.write(f"Hora de inicio: {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                     f.write(f"Hora de finalización: {end_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -634,7 +648,7 @@ class PDFSearchTab:
             except Exception as e:
                 print(f"Error escribiendo archivo de apagado: {e}")
             self.status_label.config(text="Apagando el equipo en 10 segundos...")
-            messagebox.showinfo("Apagado", "El equipo se apagará en 10 segundos. Guarda tu trabajo.")
+            # No mostramos messagebox de confirmación para que el apagado sea automático
             os.system("shutdown /s /t 10")
     
     def open_selected_file(self):
